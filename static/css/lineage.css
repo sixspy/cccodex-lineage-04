@@ -39,6 +39,50 @@ main { flex: 1; padding: 1rem 1.25rem; overflow: auto; }
   display: inline-block; font-size: .75rem; padding: .15rem .45rem;
   border-radius: 999px; border: 1px solid var(--line); background: #20332e;
 }
+.chip-ok { border-color: #3f7a5c; color: #9fe0b8; background: #16301f; }
+.chip-warn { border-color: #8a6a1c; color: #ffdf94; background: #34280d; }
+.chip-idle { color: var(--muted); }
+.fate-chip.warn { border-color: var(--danger); color: #ffb4b4; background: #3a1b1b; }
+.fate-shadow { border-color: #6a5aa8; color: #cfc4ff; background: #241d3d; }
+.fate-bypass { border-color: #2f7d8a; color: #9fe7f2; background: #123038; }
+.state-live { border-color: #3f7a5c; color: #9fe0b8; }
+.state-dead { border-color: #8a3a3a; color: #ffabab; background: #331616; }
+.state-idle { color: var(--muted); }
+.node-retired { opacity: .82; border-style: dashed; }
+.node-retired h3 { color: var(--muted); }
+.edge-dead, .edge-shadow { border-color: #5a2f2f; }
+.edge-shadow { border-color: #4a3f7a; }
+button[disabled] { opacity: .45; cursor: not-allowed; }
+
+/* 下线命运选择弹层 */
+.modal-back {
+  position: fixed; inset: 0; background: rgba(4, 10, 9, .68);
+  display: grid; place-items: center; z-index: 50;
+}
+.modal { width: min(460px, 92vw); display: grid; gap: .7rem; }
+.fate-opt {
+  display: grid; grid-template-columns: auto 1fr; gap: .6rem; align-items: start;
+  border: 1px solid var(--line); border-radius: 10px; padding: .7rem;
+  cursor: pointer; color: var(--text);
+}
+.fate-opt input { min-width: 0; }
+.modal-actions { justify-content: flex-end; }
+
+/* 抽检进度 */
+.progress {
+  position: relative; height: 14px; border-radius: 999px;
+  background: #0d1816; border: 1px solid var(--line); overflow: hidden; margin: .4rem 0;
+}
+.progress .bar { height: 100%; background: linear-gradient(90deg, #2f7d8a, var(--accent)); }
+.progress span {
+  position: absolute; inset: 0; font-size: .68rem; text-align: center;
+  line-height: 12px; color: var(--text); text-shadow: 0 0 3px #000;
+}
+.fate-ledger { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+.fate-ledger ul, .logs { margin: .3rem 0 0; padding-left: 1.1rem; font-size: .82rem; }
+.logs { list-style: none; padding-left: 0; display: grid; gap: .25rem; }
+.fp { font-family: ui-monospace, Consolas, monospace; font-size: .74rem; word-break: break-all; }
+
 .wall { display: grid; gap: .85rem; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); }
 .row { display: flex; flex-wrap: wrap; gap: .5rem; align-items: end; }
 label { display: grid; gap: .25rem; font-size: .85rem; color: var(--muted); }

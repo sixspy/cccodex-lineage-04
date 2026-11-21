@@ -8,6 +8,8 @@ import { renderSettings } from './pages/settings.js';
 
 const view = document.getElementById('view');
 const msg = document.getElementById('msg');
+const chip = document.getElementById('chip');
+const fateChip = document.getElementById('fate-chip');
 const pages = {
   nodes: renderNodes,
   edges: renderEdges,
@@ -22,18 +24,26 @@ function setMsg(t, err = false) {
   msg.className = err ? 'err' : 'muted';
 }
 
-async function boot() {
+async function refreshHeader() {
   const meta = await api('/api/meta');
   document.getElementById('lab').textContent = meta.lab || '';
-  document.getElementById('chip').textContent = meta.coverage_chip || '';
-  await go('nodes');
+  chip.textContent = meta.coverage_chip || '';
+  chip.className = 'tag chip-' + (meta.coverage_chip === '已齐套' ? 'ok'
+    : meta.coverage_chip === '未对账' ? 'idle' : 'warn');
+  if (fateChip) {
+    fateChip.textContent = meta.fate_chip || '无下线节点';
+    fateChip.classList.toggle('warn', (meta.fate_summary?.total || 0) > 0);
+  }
+  return meta;
 }
 
 async function go(name) {
   document.querySelectorAll('#nav button').forEach((b) => {
     b.classList.toggle('active', b.dataset.tab === name);
   });
-  await pages[name](view, setMsg);
+  // Expose header refresh so action pages can update the top-bar fate chip.
+  await pages[name](view, setMsg, refreshHeader);
+  await refreshHeader();
 }
 
 document.querySelectorAll('#nav button').forEach((b) => {
@@ -44,4 +54,6 @@ document.getElementById('logout').onclick = async () => {
   location.href = '/login';
 };
 
-boot().catch((e) => setMsg(e.message, true));
+refreshHeader()
+  .then(() => go('nodes'))
+  .catch((e) => setMsg(e.message, true));

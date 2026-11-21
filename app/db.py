@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS lineage_nodes (
   table_name TEXT NOT NULL,
   layer TEXT NOT NULL CHECK (layer IN ('ODS','DWD','DWS','ADS')),
   owner_team TEXT NOT NULL DEFAULT '',
-  status TEXT NOT NULL CHECK (status IN ('登记','在用','停用')),
+  status TEXT NOT NULL CHECK (status IN ('登记','在用','停用','下线')),
   note TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -28,12 +28,51 @@ CREATE TABLE IF NOT EXISTS lineage_edges (
   UNIQUE(upstream_id, downstream_id)
 );
 
+CREATE TABLE IF NOT EXISTS retire_fate_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  node_id INTEGER NOT NULL UNIQUE REFERENCES lineage_nodes(id),
+  fate TEXT NOT NULL CHECK (fate IN ('影子草稿','旁路账册')),
+  dangling_count INTEGER NOT NULL DEFAULT 0,
+  fingerprint TEXT NOT NULL DEFAULT '',
+  detail TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS shadow_draft_edges (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  retire_id INTEGER NOT NULL REFERENCES retire_fate_runs(id),
+  orig_edge_id INTEGER UNIQUE,
+  edge_code TEXT NOT NULL,
+  upstream_id INTEGER NOT NULL REFERENCES lineage_nodes(id),
+  downstream_id INTEGER NOT NULL REFERENCES lineage_nodes(id),
+  transform_kind TEXT NOT NULL DEFAULT '直抽',
+  fingerprint TEXT NOT NULL,
+  note TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS bypass_ledger (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  retire_id INTEGER NOT NULL REFERENCES retire_fate_runs(id),
+  orig_edge_id INTEGER UNIQUE,
+  edge_code TEXT NOT NULL,
+  fingerprint TEXT NOT NULL,
+  upstream_code TEXT NOT NULL DEFAULT '',
+  downstream_code TEXT NOT NULL DEFAULT '',
+  note TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS impact_jobs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   job_code TEXT NOT NULL UNIQUE,
   root_node_id INTEGER NOT NULL REFERENCES lineage_nodes(id),
   status TEXT NOT NULL CHECK (status IN ('待执行','执行中','成功','失败')),
   affected_count INTEGER NOT NULL DEFAULT 0,
+  dangling_excluded INTEGER NOT NULL DEFAULT 0,
+  excluded_count INTEGER NOT NULL DEFAULT 0,
+  bypass_count INTEGER NOT NULL DEFAULT 0,
+  fate TEXT NOT NULL DEFAULT '',
   message TEXT NOT NULL DEFAULT '',
   started_at TEXT,
   finished_at TEXT,
@@ -46,6 +85,16 @@ CREATE TABLE IF NOT EXISTS impact_hits (
   node_id INTEGER NOT NULL REFERENCES lineage_nodes(id),
   hop INTEGER NOT NULL DEFAULT 0,
   UNIQUE(job_id, node_id)
+);
+
+CREATE TABLE IF NOT EXISTS impact_excluded_edges (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_id INTEGER NOT NULL REFERENCES impact_jobs(id),
+  edge_code TEXT NOT NULL,
+  upstream_code TEXT NOT NULL DEFAULT '',
+  downstream_code TEXT NOT NULL DEFAULT '',
+  fate TEXT NOT NULL DEFAULT '',
+  reason TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS notify_logs (
@@ -65,6 +114,33 @@ CREATE TABLE IF NOT EXISTS coverage_reports (
   edge_count INTEGER NOT NULL,
   orphan_count INTEGER NOT NULL,
   uncovered_edges INTEGER NOT NULL,
+  dangling_count INTEGER NOT NULL DEFAULT 0,
+  excluded_edges INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS coverage_sampling_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  status TEXT NOT NULL CHECK (status IN ('待抽样','抽样中','完成','失败')),
+  total INTEGER NOT NULL DEFAULT 0,
+  done INTEGER NOT NULL DEFAULT 0,
+  live_nodes INTEGER NOT NULL DEFAULT 0,
+  live_edges INTEGER NOT NULL DEFAULT 0,
+  dangling_edges INTEGER NOT NULL DEFAULT 0,
+  excluded_dead INTEGER NOT NULL DEFAULT 0,
+  orphan_count INTEGER NOT NULL DEFAULT 0,
+  message TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  finished_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS ingest_logs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  fingerprint TEXT NOT NULL DEFAULT '',
+  requested INTEGER NOT NULL DEFAULT 0,
+  ingested INTEGER NOT NULL DEFAULT 0,
+  blocked INTEGER NOT NULL DEFAULT 0,
+  message TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -78,7 +154,28 @@ CREATE TABLE IF NOT EXISTS meta (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+
+CREATE INDEX IF NOT EXISTS ix_edges_up ON lineage_edges(upstream_id, status);
+CREATE INDEX IF NOT EXISTS ix_edges_down ON lineage_edges(downstream_id, status);
+CREATE INDEX IF NOT EXISTS ix_retire_node ON retire_fate_runs(node_id);
 """
+
+TABLES_IN_DROP_ORDER = (
+    "ingest_logs",
+    "coverage_sampling_runs",
+    "notify_logs",
+    "impact_excluded_edges",
+    "impact_hits",
+    "impact_jobs",
+    "coverage_reports",
+    "bypass_ledger",
+    "shadow_draft_edges",
+    "retire_fate_runs",
+    "lineage_edges",
+    "lineage_nodes",
+    "lab_settings",
+    "meta",
+)
 
 
 def connect(db_path: str | None = None) -> sqlite3.Connection:
@@ -87,6 +184,8 @@ def connect(db_path: str | None = None) -> sqlite3.Connection:
     conn = sqlite3.connect(path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    # Let a writer wait for a competing writer instead of failing instantly.
+    conn.execute("PRAGMA busy_timeout = 5000")
     return conn
 
 
@@ -98,6 +197,30 @@ def get_db(db_path: str | None = None):
         conn.commit()
     except Exception:
         conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+@contextmanager
+def immediate(db_path: str | None = None):
+    """Write transaction that takes SQLite's RESERVED lock up front.
+
+    Two值班 clicking the same node offline at the same time are serialised:
+    the second BEGIN IMMEDIATE waits (busy_timeout) or fails, then re-reads
+    the already-settled fate row and must not write a second one.
+    """
+    conn = connect(db_path)
+    conn.isolation_level = None  # autocommit; we issue BEGIN/COMMIT ourselves
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        yield conn
+        conn.execute("COMMIT")
+    except Exception:
+        try:
+            conn.execute("ROLLBACK")
+        except sqlite3.Error:
+            pass
         raise
     finally:
         conn.close()

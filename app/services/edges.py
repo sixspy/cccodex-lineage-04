@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from app.db import get_db
+from app.services import fates as fates_svc
 from app.services.errors import ServiceError
 
 
@@ -9,11 +10,47 @@ def list_edges(db_path: str | None = None) -> list[dict]:
     with get_db(db_path) as conn:
         rows = conn.execute(
             "SELECT e.*, u.node_code AS upstream_code, u.table_name AS upstream_table, "
-            "d.node_code AS downstream_code, d.table_name AS downstream_table "
+            "u.status AS upstream_status, "
+            "d.node_code AS downstream_code, d.table_name AS downstream_table, "
+            "d.status AS downstream_status "
             "FROM lineage_edges e "
             "JOIN lineage_nodes u ON u.id=e.upstream_id "
             "JOIN lineage_nodes d ON d.id=e.downstream_id "
             "ORDER BY e.id"
+        ).fetchall()
+        statuses = fates_svc.node_status_map(conn)
+        shadow_ids = fates_svc.shadow_edge_ids(conn)
+        bypass_ids = fates_svc.bypass_edge_ids(conn)
+        items = []
+        for r in rows:
+            item = dict(r)
+            state = fates_svc.edge_state(conn, r, statuses, shadow_ids, bypass_ids)
+            item["state"] = state
+            item["dangling"] = state == fates_svc.S_DANGLING
+            item["shadow"] = state == fates_svc.S_SHADOW
+            item["bypass"] = state == fates_svc.S_BYPASS
+            items.append(item)
+        return items
+
+
+def list_shadow_edges(db_path: str | None = None) -> list[dict]:
+    with get_db(db_path) as conn:
+        rows = conn.execute(
+            "SELECT s.*, r.fate, n.node_code AS retired_node_code "
+            "FROM shadow_draft_edges s "
+            "JOIN retire_fate_runs r ON r.id=s.retire_id "
+            "JOIN lineage_nodes n ON n.id=r.node_id ORDER BY s.id"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def list_bypass_edges(db_path: str | None = None) -> list[dict]:
+    with get_db(db_path) as conn:
+        rows = conn.execute(
+            "SELECT b.*, r.fate, n.node_code AS retired_node_code "
+            "FROM bypass_ledger b "
+            "JOIN retire_fate_runs r ON r.id=b.retire_id "
+            "JOIN lineage_nodes n ON n.id=r.node_id ORDER BY b.id"
         ).fetchall()
         return [dict(r) for r in rows]
 
@@ -40,8 +77,8 @@ def create_edge(
         ).fetchone()
         if not up or not down:
             raise ServiceError("上下游节点不存在", 404)
-        if up["status"] == "停用" or down["status"] == "停用":
-            raise ServiceError("停用节点不可建边", 409)
+        if up["status"] in fates_svc.DEAD_NODE_STATUSES or down["status"] in fates_svc.DEAD_NODE_STATUSES:
+            raise ServiceError("停用/下线节点不可建边", 409)
         try:
             cur = conn.execute(
                 "INSERT INTO lineage_edges(edge_code, upstream_id, downstream_id, "
@@ -76,7 +113,7 @@ def publish_edge(edge_id: int, db_path: str | None = None) -> dict:
             node = conn.execute(
                 "SELECT status FROM lineage_nodes WHERE id=?", (nid,)
             ).fetchone()
-            if not node or node["status"] == "停用":
+            if not node or node["status"] in fates_svc.DEAD_NODE_STATUSES:
                 raise ServiceError("上下游须有效", 409)
             if node["status"] == "登记":
                 conn.execute(

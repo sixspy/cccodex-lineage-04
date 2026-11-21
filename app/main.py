@@ -5,10 +5,13 @@ from bottle import Bottle, HTTPResponse, request, response, static_file
 from itsdangerous import BadSignature, URLSafeSerializer
 
 from app.config import Config
+from app.db import get_db
 from app.seed import seed_if_needed
 from app.services import coverage as coverage_svc
 from app.services import edges as edges_svc
+from app.services import fates as fates_svc
 from app.services import impact as impact_svc
+from app.services import ingest as ingest_svc
 from app.services import nodes as nodes_svc
 from app.services import notify as notify_svc
 from app.services import settings as settings_svc
@@ -126,11 +129,19 @@ def create_app() -> Bottle:
     @wrap
     def api_meta():
         _require_user()
+        fp = ingest_svc.current_fingerprint()
+        with get_db() as conn:
+            fate = fates_svc.fate_summary(conn)
         return _json(
             {
                 "lab": Config.LAB_NAME,
                 "user": _current_user(),
                 "coverage_chip": coverage_svc.latest_chip(),
+                "fates": list(fates_svc.FATES),
+                "fate_chip": fate["chip"],
+                "fate_summary": fate,
+                "catalog_fingerprint": fp["fingerprint"],
+                "retired_count": fp["fate_count"],
             }
         )
 
@@ -140,6 +151,12 @@ def create_app() -> Bottle:
         _require_user()
         layer = request.query.get("layer") or None
         return _json({"items": nodes_svc.list_nodes(layer)})
+
+    @app.get("/api/nodes/<node_id:int>")
+    @wrap
+    def api_node_detail(node_id):
+        _require_user()
+        return _json({"item": nodes_svc.get_node(node_id)})
 
     @app.post("/api/nodes")
     @wrap
@@ -165,13 +182,40 @@ def create_app() -> Bottle:
     @wrap
     def api_nodes_retire(node_id):
         _require_user()
-        return _json({"item": nodes_svc.retire_node(node_id)})
+        body = _read_json()
+        return _json(
+            {"item": nodes_svc.retire_node(node_id, str(body.get("fate") or ""))}
+        )
 
     @app.get("/api/edges")
     @wrap
     def api_edges_list():
         _require_user()
         return _json({"items": edges_svc.list_edges()})
+
+    @app.get("/api/fates")
+    @wrap
+    def api_fates_list():
+        _require_user()
+        with get_db() as conn:
+            return _json(
+                {
+                    "items": fates_svc.list_fate_runs(conn),
+                    "summary": fates_svc.fate_summary(conn),
+                }
+            )
+
+    @app.get("/api/edges/shadow")
+    @wrap
+    def api_edges_shadow():
+        _require_user()
+        return _json({"items": edges_svc.list_shadow_edges()})
+
+    @app.get("/api/edges/bypass")
+    @wrap
+    def api_edges_bypass():
+        _require_user()
+        return _json({"items": edges_svc.list_bypass_edges()})
 
     @app.post("/api/edges")
     @wrap
@@ -244,6 +288,49 @@ def create_app() -> Bottle:
     def api_coverage_run():
         _require_user()
         return _json({"report": coverage_svc.run_coverage()})
+
+    @app.get("/api/coverage/samplings")
+    @wrap
+    def api_sampling_list():
+        _require_user()
+        return _json({"items": coverage_svc.list_sampling_runs()})
+
+    @app.get("/api/coverage/samplings/<run_id:int>")
+    @wrap
+    def api_sampling_detail(run_id):
+        _require_user()
+        return _json({"item": coverage_svc.get_sampling_run(run_id)})
+
+    @app.post("/api/coverage/samplings")
+    @wrap
+    def api_sampling_run():
+        _require_user()
+        return _json({"run": coverage_svc.run_sampling()})
+
+    @app.get("/api/ingest/fingerprint")
+    @wrap
+    def api_ingest_fingerprint():
+        _require_user()
+        return _json(ingest_svc.current_fingerprint())
+
+    @app.get("/api/ingest/logs")
+    @wrap
+    def api_ingest_logs():
+        _require_user()
+        return _json({"items": ingest_svc.list_ingest_logs()})
+
+    @app.post("/api/ingest")
+    @wrap
+    def api_ingest_run():
+        _require_user()
+        body = _read_json()
+        return _json(
+            {
+                "item": ingest_svc.run_ingest(
+                    str(body.get("fingerprint") or ""),
+                )
+            }
+        )
 
     @app.get("/api/settings")
     @wrap

@@ -1,9 +1,9 @@
 """初始化样例血缘节点、边、台参数。"""
 from __future__ import annotations
 
-from app.db import SCHEMA, get_db, init_schema
+from app.db import SCHEMA, TABLES_IN_DROP_ORDER, get_db, init_schema
 
-SCHEMA_VERSION = "lineage-v1"
+SCHEMA_VERSION = "lineage-v2"
 
 
 def _schema_compatible(conn) -> bool:
@@ -16,7 +16,48 @@ def _schema_compatible(conn) -> bool:
         r["name"]
         for r in conn.execute("PRAGMA table_info(lineage_nodes)").fetchall()
     }
-    return "node_code" in cols and "layer" in cols
+    if not {"node_code", "layer", "status"}.issubset(cols):
+        return False
+    # 节点状态须允许“下线”
+    ddl = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='lineage_nodes'"
+    ).fetchone()["sql"]
+    if "下线" not in (ddl or ""):
+        return False
+    names = {
+        r["name"]
+        for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    required_tables = {
+        "retire_fate_runs",
+        "shadow_draft_edges",
+        "bypass_ledger",
+        "impact_excluded_edges",
+        "coverage_sampling_runs",
+        "ingest_logs",
+    }
+    if not required_tables.issubset(names):
+        return False
+    # 关键列不得缺失（旧库未加列时强制重建）
+    checks = {
+        "impact_jobs": {"dangling_excluded", "excluded_count", "bypass_count", "fate"},
+        "coverage_reports": {"dangling_count", "excluded_edges"},
+    }
+    for table, needed in checks.items():
+        got = {
+            r["name"]
+            for r in conn.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        if not needed.issubset(got):
+            return False
+    return True
+
+
+def _drop_all(conn) -> None:
+    for table in TABLES_IN_DROP_ORDER:
+        conn.execute(f"DROP TABLE IF EXISTS {table}")
 
 
 def seed_if_needed(db_path: str | None = None) -> dict:
@@ -26,17 +67,7 @@ def seed_if_needed(db_path: str | None = None) -> dict:
             "SELECT value FROM meta WHERE key='schema_version'"
         ).fetchone()
         if not _schema_compatible(conn) or (ver and ver["value"] != SCHEMA_VERSION):
-            for table in (
-                "notify_logs",
-                "impact_hits",
-                "impact_jobs",
-                "coverage_reports",
-                "lineage_edges",
-                "lineage_nodes",
-                "lab_settings",
-                "meta",
-            ):
-                conn.execute(f"DROP TABLE IF EXISTS {table}")
+            _drop_all(conn)
             conn.executescript(SCHEMA)
         elif conn.execute("SELECT value FROM meta WHERE key='seeded'").fetchone():
             return {"seeded": False, "reason": "already"}
@@ -66,6 +97,8 @@ def seed_if_needed(db_path: str | None = None) -> dict:
             ("E-04", "N-DWD-PAY", "N-DWS-REV", "汇总"),
             ("E-05", "N-DWS-REV", "N-ADS-DASH", "直抽"),
             ("E-06", "N-DWS-REV", "N-ADS-ALERT", "直抽"),
+            # 一条挂在告警节点上、便于下线演示的边：告警看板相互引用
+            ("E-07", "N-ADS-ALERT", "N-ADS-DASH", "直抽"),
         ]
         for code, up, down, kind in edges:
             conn.execute(
@@ -76,15 +109,15 @@ def seed_if_needed(db_path: str | None = None) -> dict:
         # one draft edge for coverage gap demo
         conn.execute(
             "INSERT INTO lineage_edges(edge_code, upstream_id, downstream_id, "
-            "transform_kind, status, note) VALUES ('E-DRAFT',?,?,'直抽','草稿','待审')"
-            ,
+            "transform_kind, status, note) VALUES ('E-DRAFT',?,?,'直抽','草稿','待审')",
             (ids["N-ODS-ORD"], ids["N-ADS-DASH"]),
         )
         conn.execute(
             "INSERT INTO lab_settings(key, value, label) VALUES "
             "('impact_max_hop','8','影响最大跳数'),"
             "('notify_channel','站内','默认通知渠道'),"
-            "('coverage_mode','严格','覆盖对账模式')"
+            "('coverage_mode','严格','覆盖对账模式'),"
+            "('retire_fate','','上次下线所选命运')"
         )
         conn.execute("INSERT INTO meta(key, value) VALUES ('seeded','1')")
         conn.execute(
@@ -96,22 +129,13 @@ def seed_if_needed(db_path: str | None = None) -> dict:
             "seeded": True,
             "nodes": len(nodes),
             "edges": len(edges) + 1,
-            "settings": 3,
+            "settings": 4,
         }
 
 
 def reset_seed(db_path: str | None = None) -> None:
     init_schema(db_path)
     with get_db(db_path) as conn:
-        for table in (
-            "notify_logs",
-            "impact_hits",
-            "impact_jobs",
-            "coverage_reports",
-            "lineage_edges",
-            "lineage_nodes",
-            "lab_settings",
-            "meta",
-        ):
+        for table in TABLES_IN_DROP_ORDER:
             conn.execute(f"DELETE FROM {table}")
     seed_if_needed(db_path)
